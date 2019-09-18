@@ -2,6 +2,7 @@ package win.aspring.replaceword.utils;
 
 import org.apache.poi.hwpf.HWPFDocument;
 import org.apache.poi.hwpf.usermodel.Range;
+import org.apache.poi.ooxml.POIXMLDocument;
 import org.apache.poi.xwpf.usermodel.XWPFDocument;
 import org.apache.poi.xwpf.usermodel.XWPFParagraph;
 import org.apache.poi.xwpf.usermodel.XWPFRun;
@@ -10,13 +11,14 @@ import org.apache.poi.xwpf.usermodel.XWPFTableCell;
 import org.apache.poi.xwpf.usermodel.XWPFTableRow;
 
 import java.io.BufferedReader;
-import java.io.ByteArrayOutputStream;
 import java.io.File;
 import java.io.FileInputStream;
 import java.io.FileOutputStream;
 import java.io.IOException;
 import java.io.InputStreamReader;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 
 import win.aspring.replaceword.Constants;
 
@@ -70,7 +72,9 @@ public class FileUtil {
             if (oldFile.getAbsolutePath().endsWith(Constants.SUFFIX_FILE_DOC)) {
                 replaceDOC(oldFile, newFile, key, replace);
             } else if (oldFile.getAbsolutePath().endsWith(Constants.SUFFIX_FILE_DOCX)) {
-                replaceDOCX(oldFile, newFile, key, replace);
+                replaceDOCX(oldFile.getAbsolutePath(), newFile, key, replace);
+            } else if (oldFile.getAbsolutePath().startsWith("~")) {
+                return true;
             }
             return true;
         } catch (IOException e) {
@@ -90,22 +94,17 @@ public class FileUtil {
     private static void replaceDOC(File oldFile, String newFile, String key, String replace) throws IOException {
         FileInputStream in = new FileInputStream(oldFile);
         HWPFDocument hdt = new HWPFDocument(in);
-
         //读取word文本内容
         Range range = hdt.getRange();
         //替换文本内容
         range.replaceText(key, replace);
 
-        ByteArrayOutputStream ostream = new ByteArrayOutputStream();
-        FileOutputStream out = new FileOutputStream(newFile, true);
-        hdt.write(ostream);
-        //输出字节流
-        out.write(ostream.toByteArray());
+        FileOutputStream out = new FileOutputStream(newFile);
+        hdt.write(out);
 
         in.close();
         hdt.close();
         out.close();
-        ostream.close();
     }
 
     /**
@@ -116,46 +115,21 @@ public class FileUtil {
      * @param key     将要替换的内容
      * @param replace 替换为的内容
      */
-    private static void replaceDOCX(File oldFile, String newFile, String key, String replace) throws IOException {
-        FileInputStream in = new FileInputStream(oldFile);
-        XWPFDocument doc = new XWPFDocument(in);
-        for (XWPFParagraph p : doc.getParagraphs()) {
-            List<XWPFRun> runs = p.getRuns();
-            if (runs != null) {
-                for (XWPFRun r : runs) {
-                    String text = r.getText(0);
-                    if (text != null && text.contains(key)) {
-                        text = text.replace(key, replace);
-                        r.setText(text, 0);
-                    }
-                }
-            }
-        }
-        for (XWPFTable tbl : doc.getTables()) {
-            for (XWPFTableRow row : tbl.getRows()) {
-                for (XWPFTableCell cell : row.getTableCells()) {
-                    for (XWPFParagraph p : cell.getParagraphs()) {
-                        for (XWPFRun r : p.getRuns()) {
-                            String text = r.getText(0);
-                            if (text != null && text.contains(key)) {
-                                text = text.replace(key, replace);
-                                r.setText(text, 0);
-                            }
-                        }
-                    }
-                }
-            }
-        }
-        ByteArrayOutputStream ostream = new ByteArrayOutputStream();
-        FileOutputStream out = new FileOutputStream(newFile, true);
-        doc.write(ostream);
-        //输出字节流
-        out.write(ostream.toByteArray());
+    private static void replaceDOCX(String oldFile, String newFile, String key, String replace) throws IOException {
+        XWPFDocument doc = new XWPFDocument(POIXMLDocument.openPackage(oldFile));
+        Map<String, String> map = new HashMap<>();
+        map.put(key, replace);
 
-        in.close();
+        replaceInAllParagraphs(doc.getParagraphs(), map);
+
+        replaceInTables(doc.getTables(), map);
+
+        FileOutputStream out = new FileOutputStream(newFile, true);
+        doc.write(out);
+
         doc.close();
+        out.flush();
         out.close();
-        ostream.close();
     }
 
     /**
@@ -176,5 +150,152 @@ public class FileUtil {
         }
         br.close();
         return sb;
+    }
+
+    /**
+     * 替换所有段落中的标记
+     *
+     * @param xwpfParagraphList 段落列表
+     * @param params            替换数据
+     */
+    private static void replaceInAllParagraphs(List<XWPFParagraph> xwpfParagraphList, Map<String, String> params) {
+        for (XWPFParagraph paragraph : xwpfParagraphList) {
+            if (paragraph.getText() == null || paragraph.getText().equals("")) continue;
+            for (String key : params.keySet()) {
+                if (paragraph.getText().contains(key)) {
+                    replaceInParagraph(paragraph, key, params.get(key));
+                }
+            }
+        }
+    }
+
+    /**
+     * 替换段落中的字符串
+     *
+     * @param xwpfParagraph 段落
+     * @param oldString     旧数据
+     * @param newString     新数据
+     */
+    private static void replaceInParagraph(XWPFParagraph xwpfParagraph, String oldString, String newString) {
+        Map<String, Integer> pos_map = findSubRunPosInParagraph(xwpfParagraph, oldString);
+        if (pos_map != null) {
+            List<XWPFRun> runs = xwpfParagraph.getRuns();
+            XWPFRun modelRun = runs.get(pos_map.get("end_pos"));
+            XWPFRun xwpfRun = xwpfParagraph.insertNewRun(pos_map.get("end_pos") + 1);
+            xwpfRun.setText(newString);
+            if (modelRun.getFontSize() != -1) {
+                //默认值是五号字体，但五号字体getFontSize()时，返回-1
+                xwpfRun.setFontSize(modelRun.getFontSize());
+            }
+            xwpfRun.setFontFamily(modelRun.getFontFamily());
+            xwpfRun.setBold(modelRun.isBold());
+            xwpfRun.setColor(modelRun.getColor());
+            xwpfRun.setCapitalized(modelRun.isCapitalized());
+            xwpfRun.setCharacterSpacing(modelRun.getCharacterSpacing());
+            xwpfRun.setDoubleStrikethrough(modelRun.isDoubleStrikeThrough());
+            xwpfRun.setEmbossed(modelRun.isEmbossed());
+            xwpfRun.setImprinted(modelRun.isImprinted());
+            xwpfRun.setTextScale(modelRun.getTextScale());
+            xwpfRun.setItalic(modelRun.isItalic());
+            xwpfRun.setKerning(modelRun.getKerning());
+            xwpfRun.setLang(modelRun.getLang());
+            xwpfRun.setShadow(modelRun.isShadowed());
+            xwpfRun.setSmallCaps(modelRun.isSmallCaps());
+            xwpfRun.setStrikeThrough(modelRun.isStrikeThrough());
+            xwpfRun.setSubscript(modelRun.getSubscript());
+            for (int i = pos_map.get("end_pos"); i >= pos_map.get("start_pos"); i--) {
+                xwpfParagraph.removeRun(i);
+            }
+        }
+    }
+
+
+    /**
+     * 找到段落中子串的起始XWPFRun下标和终止XWPFRun的下标
+     *
+     * @param xwpfParagraph 段落
+     * @param substring     旧string
+     * @return 下标
+     */
+    private static Map<String, Integer> findSubRunPosInParagraph(XWPFParagraph xwpfParagraph, String substring) {
+        List<XWPFRun> runs = xwpfParagraph.getRuns();
+        int start_pos = 0;
+        int end_pos = 0;
+        StringBuilder builder;
+        for (int i = 0; i < runs.size(); i++) {
+            builder = new StringBuilder();
+            start_pos = i;
+            for (int j = i; j < runs.size(); j++) {
+                if (runs.get(j).getText(runs.get(j).getTextPosition()) == null) continue;
+                builder.append(runs.get(j).getText(runs.get(j).getTextPosition()));
+                if (builder.toString().equals(substring)) {
+                    end_pos = j;
+                    Map<String, Integer> map = new HashMap<>();
+                    map.put("start_pos", start_pos);
+                    map.put("end_pos", end_pos);
+                    return map;
+                }
+            }
+        }
+        return null;
+    }
+
+    /**
+     * 替换所有的表格
+     *
+     * @param xwpfTableList 表格列表
+     * @param params        替换参数
+     */
+    private static void replaceInTables(List<XWPFTable> xwpfTableList, Map<String, String> params) {
+        for (XWPFTable table : xwpfTableList) {
+            replaceInTable(table, params);
+        }
+    }
+
+    /**
+     * 替换一个表格中的所有行
+     *
+     * @param xwpfTable 表格
+     * @param params    替换参数
+     */
+    private static void replaceInTable(XWPFTable xwpfTable, Map<String, String> params) {
+        List<XWPFTableRow> rows = xwpfTable.getRows();
+        replaceInRows(rows, params);
+    }
+
+
+    /**
+     * 替换表格中的一行
+     *
+     * @param rows   表格的一行
+     * @param params 替换参数
+     */
+    private static void replaceInRows(List<XWPFTableRow> rows, Map<String, String> params) {
+        for (XWPFTableRow row : rows) {
+            replaceInCells(row.getTableCells(), params);
+        }
+    }
+
+    /**
+     * 替换一行中所有的单元格
+     *
+     * @param xwpfTableCellList 表格中单元格列表
+     * @param params            替换参数
+     */
+    private static void replaceInCells(List<XWPFTableCell> xwpfTableCellList, Map<String, String> params) {
+        for (XWPFTableCell cell : xwpfTableCellList) {
+            replaceInCell(cell, params);
+        }
+    }
+
+    /**
+     * 替换表格中每一行中的每一个单元格中的所有段落
+     *
+     * @param cell   单元格中的一行
+     * @param params 参数
+     */
+    private static void replaceInCell(XWPFTableCell cell, Map<String, String> params) {
+        List<XWPFParagraph> cellParagraphs = cell.getParagraphs();
+        replaceInAllParagraphs(cellParagraphs, params);
     }
 }
